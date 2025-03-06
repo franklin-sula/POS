@@ -15,9 +15,10 @@ import {
   Modal,
 } from "react-native-paper";
 import { FlashList } from "@shopify/flash-list";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { productService } from "../services/productService";
 import { CameraView, useCameraPermissions } from "expo-camera";
+import CheckoutModal from "../components/CheckoutModal";
 
 const { width } = Dimensions.get("window");
 const GRID_SIZE = width >= 1024 ? 4 : width >= 768 ? 3 : 2;
@@ -26,6 +27,7 @@ const CARD_WIDTH = (width - (GRID_SIZE + 1) * CARD_MARGIN * 2) / GRID_SIZE;
 
 const OrderScreen = () => {
   const theme = useTheme();
+  const queryClient = useQueryClient();
   const [cart, setCart] = useState([]);
   const [categories, setCategories] = useState([]);
   const [selectedCategory, setSelectedCategory] = useState(null);
@@ -33,11 +35,13 @@ const OrderScreen = () => {
   const [scanning, setScanning] = useState(false);
   const [permission, requestPermission] = useCameraPermissions();
   const [scannedProduct, setScannedProduct] = useState(null);
+  const [checkoutVisible, setCheckoutVisible] = useState(false);
 
   const {
     data: products,
     isLoading,
     error,
+    refetch,
   } = useQuery({
     queryKey: ["products"],
     queryFn: productService.getProducts,
@@ -48,19 +52,34 @@ const OrderScreen = () => {
     : products;
 
   const addToCart = (product) => {
+    // Check if product is in stock
+    if (product.stock <= 0) {
+      alert(`Sorry, ${product.name} is out of stock.`);
+      return;
+    }
+
     setCart((current) => {
       const existing = current.find((item) => item.id === product.id);
+
       if (existing) {
+        const newQuantity = (existing.quantity || 0) + (product.quantity || 1);
+
+        // Check if there's enough stock
+        if (newQuantity > product.stock) {
+          alert(
+            `Sorry, only ${product.stock} units available for ${product.name}.`
+          );
+          return current.map((item) =>
+            item.id === product.id ? { ...item, quantity: product.stock } : item
+          );
+        }
+
         return current.map((item) =>
-          item.id === product.id
-            ? {
-                ...item,
-                quantity: (item.quantity || 0) + (product.quantity || 1),
-              }
-            : item
+          item.id === product.id ? { ...item, quantity: newQuantity } : item
         );
+      } else {
+        return [...current, { ...product, quantity: product.quantity || 1 }];
       }
-      return [...current, { ...product, quantity: product.quantity || 1 }];
     });
   };
 
@@ -108,40 +127,83 @@ const OrderScreen = () => {
     }
   };
 
+  const handleCheckoutComplete = (success) => {
+    if (success) {
+      setCart([]);
+      queryClient.invalidateQueries(["products"]);
+    }
+    setCheckoutVisible(false);
+  };
+
   const totalItems = cart.reduce((sum, item) => sum + item.quantity, 0);
   const total = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
 
-  const renderProductCard = ({ item }) => (
-    <TouchableRipple
-      onPress={() => addToCart({ ...item, quantity: 1 })}
-      borderless
-      style={{ borderRadius: 16 }}
-    >
-      <Surface
-        style={[styles.productCard, { width: CARD_WIDTH }]}
-        elevation={2}
+  const renderProductCard = ({ item }) => {
+    const isOutOfStock = item.stock <= 0;
+    const isLowStock = item.stock > 0 && item.stock <= 5;
+
+    return (
+      <TouchableRipple
+        onPress={() =>
+          isOutOfStock ? null : addToCart({ ...item, quantity: 1 })
+        }
+        borderless
+        style={{
+          borderRadius: 16,
+          opacity: isOutOfStock ? 0.6 : 1,
+        }}
+        disabled={isOutOfStock}
       >
-        <View style={styles.productContent}>
-          <Text style={styles.productName} numberOfLines={2}>
-            {item.name}
-          </Text>
-          {item.category && (
-            <Text style={styles.productCategory}>{item.category}</Text>
-          )}
-          <View style={styles.priceActionContainer}>
-            <Text style={styles.productPrice}>₱{item.price.toFixed(2)}</Text>
-            <IconButton
-              icon="plus"
-              mode="contained"
-              size={16}
-              onPress={() => addToCart({ ...item, quantity: 1 })}
-              style={styles.addButtonIcon}
-            />
+        <Surface
+          style={[styles.productCard, { width: CARD_WIDTH }]}
+          elevation={2}
+        >
+          <View style={styles.productContent}>
+            <Text style={styles.productName} numberOfLines={2}>
+              {item.name}
+            </Text>
+            {item.category && (
+              <Text style={styles.productCategory}>{item.category}</Text>
+            )}
+
+            {/* Stock display */}
+            <View style={styles.productStockInfo}>
+              <Text
+                style={[
+                  styles.stockText,
+                  isOutOfStock
+                    ? styles.outOfStockText
+                    : isLowStock
+                    ? styles.lowStockText
+                    : null,
+                ]}
+              >
+                {isOutOfStock
+                  ? "Out of Stock"
+                  : isLowStock
+                  ? `Low Stock: ${item.stock}`
+                  : `Stock: ${item.stock}`}
+              </Text>
+            </View>
+
+            <View style={styles.priceActionContainer}>
+              <Text style={styles.productPrice}>₱{item.price.toFixed(2)}</Text>
+              <IconButton
+                icon="plus"
+                mode="contained"
+                size={16}
+                onPress={() =>
+                  isOutOfStock ? null : addToCart({ ...item, quantity: 1 })
+                }
+                style={styles.addButtonIcon}
+                disabled={isOutOfStock}
+              />
+            </View>
           </View>
-        </View>
-      </Surface>
-    </TouchableRipple>
-  );
+        </Surface>
+      </TouchableRipple>
+    );
+  };
 
   const renderCartItem = ({ item }) => (
     <Surface style={styles.cartItemSurface} elevation={1}>
@@ -285,7 +347,7 @@ const OrderScreen = () => {
     >
       {/* Title with Scan Button */}
       <View style={styles.titleContainer}>
-        <Text style={styles.headerTitle}>Menu</Text>
+        <Text style={styles.headerTitle}>Order Screen</Text>
         <View style={styles.headerActions}>
           <IconButton icon="barcode-scan" size={24} onPress={startScanning} />
           {totalItems > 0 && (
@@ -377,7 +439,7 @@ const OrderScreen = () => {
         >
           <View style={styles.cartHeaderContent}>
             <View style={styles.cartTitleContainer}>
-              <Text style={styles.cartTitle}>Your Order</Text>
+              <Text style={styles.cartTitle}>Order</Text>
               {totalItems > 0 && (
                 <Badge size={24} style={styles.orderBadge}>
                   {totalItems}
@@ -424,6 +486,7 @@ const OrderScreen = () => {
                     disabled={cart.length === 0}
                     style={styles.checkoutButton}
                     contentStyle={styles.checkoutButtonContent}
+                    onPress={() => setCheckoutVisible(true)}
                   >
                     Proceed to Checkout
                   </Button>
@@ -433,6 +496,12 @@ const OrderScreen = () => {
           </>
         )}
       </Surface>
+      <CheckoutModal
+        visible={checkoutVisible}
+        onDismiss={handleCheckoutComplete}
+        cart={cart}
+        total={total}
+      />
     </SafeAreaView>
   );
 };
@@ -693,6 +762,20 @@ const styles = StyleSheet.create({
   },
   actionButton: {
     flex: 1,
+  },
+  productStockInfo: {
+    marginTop: 4,
+    marginBottom: 2,
+  },
+  stockText: {
+    fontSize: 12,
+    fontWeight: "500",
+  },
+  lowStockText: {
+    color: "#FF9800", // Orange for low stock
+  },
+  outOfStockText: {
+    color: "#D32F2F", // Red for out of stock
   },
 });
 
